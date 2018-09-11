@@ -1,0 +1,109 @@
+
+------------------------------
+RK3399 Boot Process (as per Rockchip docs)
+------------------------------
+
+The RK3399 AP reset vector is fixed to the address 0xffff0000, which internally
+is mapped to the beginning of the RK3399's 32Kb BootROM, by default. The actual 
+mapping of the BootROM to 0xffff0000 is not a fixed mapping state, and is instead
+initiated by SGRF_PMU_CON0[15] (REMAP) being zero on boot. If software raises the
+REMAP register to 1, the 32KB region in which the BootROM resides is remapped to 
+INTMEM0. The BootROM is still accessible in the REMAP state from it's fixed location
+of 0xfffd0000 to 0xfffe0000.
+
+|===========================>
+| RK3399 BootROM basics
+|===========================>
+
+The BootROM beginning at the afformentioned reset vector performs various system
+initalization tasks (excluding DRAM initalization) before attempting to further
+load firmware from storage. The loading process visualized below looks for an ID_BLOCK
+residing on storage in the order of (1.) SD (2.) eMMC (3.) SPI. Once the ID_BLOCK
+is found the BootROM copies a DDR_INIT image from storage into SRAM. Once The DDR_INIT
+image sets up DRAM, the BootROM then copies the SPL (secondary program loader) from
+storage to DRAM. Fianlly the BootROM jumps to the SPL code for OS init.
+
+    |------------------|      |----|                 |------|
+    |      BootROM     |----->| SD |---> ID_BLOCK?-->| eMMC |---> ID_BLOCK?-->...-> MASKROM Mode
+  |-|------------------|      |----|         |       |------|         |
+  |   /|\  |------|                        (YES)                      |
+  |    |<--| SRAM | <-----(DDR_INIT)---------|------------------------|
+  |        |------|
+  |
+  |        |------------------------|                    |-----------------|
+  |------->| Storage Source (Prev.) |- (Copy + Jump) - > |  External DRAM  |     
+           |------------------------|                    |-----------------|
+        
+|===========================>
+| RK3399 BootROM MASKROM Mode
+|===========================>
+
+If the BootROM fails to find an ID_BLOCK on any storage, or a SPL reboots with 
+the special MASKROM register being set, the BootROM will enter the special 
+MASKROM mode. MASKROM mode includes a small USB stack which is able to download
+and execute firmware images over the wire. MaskROM mode is particularly useful 
+for programming eMMC storage at manufacture time. A typical MaskROM boot flow
+is visualized below
+
+  |---------|                                 |--------------|
+  | BootROM |------> NO ID_BLOCK Found -----> | MaskROM Mode |--|
+  |---------|                                 |--------------|  |
+                                                                |
+  |-------------------------------------------------------------|
+  |     |-------------------------|    |------------------------|
+  |---->| Download DDR_INIT Image |--->| Download RockUSB Image |---> Poll For Images Over USB
+        |-------------------------|    |------------------------|
+                    /|\                           /|\
+                     |                             |
+                   (USB)                         (USB)
+        |--------------------------------------------------------|
+        |              rkxx_loader_vxxxx.xxx.bin                 | 
+        |--------------------------------------------------------| <-- rkdeveloptool
+        |   DDR.bin   |    usbpug.bin   | rkxx_miniloader_vx.bin |
+        |-------------|-----------------|------------------------|
+
+More detail regarding MaskROM RockUSB mode is expalined below
+
+|===========================>
+| RK3399 Standard Firmware Layouts
+|===========================>
+
+The RK3399, has a set of standard firmware layouts when utilizing Rockchip OEM 
+firmware. Irregardless of the firmware layout selected, all Rockchip boot storage
+mediums are expected to be partitioned using a GPT scheme. Rockchip for most SOC's 
+provides two SPL implementations, the first being a forked U-Boot (for which Rockchip
+is apparently putting some effort into merging into mainline), and the second being 
+the use of a proprietary Rockchip "miniloader" to bootstrap a higher level bootloader.
+The following will attempt to expalin both as they apply to the RK3399
+
+(1.) U-Boot native SPL
+                   |------------| 
+                   | SRAM       |
+               (1.)|-------------------------------| 
+  |-----------|    |    |-----------------------|  |
+  |  BootROM  |----|--> | U-Boot TPL (DDR_INIT) |  |
+  |-----------|    |    |-----------------------|  |
+  (2.)|/|\         |----------------|--------------| 
+      | |                           |    |----------|
+      | |---------------------------|    | DRAM     |
+      |                                  |----------|------------------|
+      |                                  |    |-------------------|    |
+      |----------------------------------|--->| U-Boot SPL        |----|---> U-Boot ----> Kernel
+                                         |    |-------------------|    |
+                                         |-----------------------------|
+
+(1.) Proprietary Miniloader
+                   |------------| 
+                   | SRAM       |
+               (1.)|-------------------------------| 
+  |-----------|    |    |-----------------------|  |
+  |  BootROM  |----|--> | DDR_INIT_v_xxxxx.bin  |  |
+  |-----------|    |    |-----------------------|  |
+  (2.)|/|\         |----------------|--------------| 
+      | |                           |    |----------|
+      | |---------------------------|    | DRAM     |
+      |                                  |----------|------------------|
+      |                                  |    |-------------------|    |
+      |----------------------------------|--->| Miniloader_xx.bin |----|---> U-Boot ----> Kernel
+                                         |    |-------------------|    |
+                                         |-----------------------------|
